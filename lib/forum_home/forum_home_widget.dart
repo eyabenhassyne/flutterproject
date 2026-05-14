@@ -72,6 +72,9 @@ class _ForumHomeWidgetState extends State<ForumHomeWidget> {
     super.initState();
     _model = createModel(context, () => ForumHomeModel());
 
+    _model.searchTextController ??= TextEditingController();
+    _model.searchFocusNode ??= FocusNode();
+
     WidgetsBinding.instance.addPostFrameCallback((_) => safeSetState(() {}));
   }
 
@@ -80,6 +83,190 @@ class _ForumHomeWidgetState extends State<ForumHomeWidget> {
     _model.dispose();
 
     super.dispose();
+  }
+
+  String _normalizeFilterText(String value) {
+    return value
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9àâçéèêëîïôûùüÿñæœ]+'), ' ')
+        .trim();
+  }
+
+  bool _matchesCategory(PostsRecord post) {
+    if (_model.selectedCategory == 'Tous') {
+      return true;
+    }
+
+    final postCategory = _normalizeFilterText(post.category);
+    final selectedCategory = _normalizeFilterText(_model.selectedCategory);
+    return postCategory.contains(selectedCategory) ||
+        selectedCategory.contains(postCategory);
+  }
+
+  bool _matchesSearch(PostsRecord post) {
+    final searchText =
+        _normalizeFilterText(_model.searchTextController.text.trim());
+    if (searchText.isEmpty) {
+      return true;
+    }
+
+    final searchableText = _normalizeFilterText([
+      post.title,
+      post.content,
+      post.authorName,
+      post.category,
+    ].join(' '));
+
+    return searchableText.contains(searchText);
+  }
+
+  Widget _categoryChip(String label, String value) {
+    final selected = _model.selectedCategory == value;
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(18.0),
+      onTap: () => safeSetState(() => _model.selectedCategory = value),
+      child: Container(
+        height: 36.0,
+        decoration: BoxDecoration(
+          color: selected ? Color(0xFF2563EB) : Color(0xFFEFF6FF),
+          borderRadius: BorderRadius.circular(18.0),
+          border: selected
+              ? null
+              : Border.all(
+                  color: Color(0xFFBFDBFE),
+                  width: 1.0,
+                ),
+        ),
+        child: Align(
+          alignment: AlignmentDirectional(0.0, 0.0),
+          child: Padding(
+            padding: EdgeInsetsDirectional.fromSTEB(12.0, 8.0, 12.0, 8.0),
+            child: Text(
+              label,
+              style: FlutterFlowTheme.of(context).labelMedium.override(
+                    font: GoogleFonts.inter(
+                      fontWeight: FontWeight.w600,
+                      fontStyle:
+                          FlutterFlowTheme.of(context).labelMedium.fontStyle,
+                    ),
+                    color: selected ? Colors.white : Color(0xFF2563EB),
+                    letterSpacing: 0.0,
+                    fontWeight: FontWeight.w600,
+                    fontStyle:
+                        FlutterFlowTheme.of(context).labelMedium.fontStyle,
+                  ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _toggleLike(PostsRecord post) async {
+    if (currentUserUid.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Connectez-vous pour aimer une discussion.')),
+      );
+      return;
+    }
+
+    final existingLikes = await queryLikesRecordOnce(
+      queryBuilder: (likesRecord) => likesRecord
+          .where('postRef', isEqualTo: post.reference)
+          .where('userId', isEqualTo: currentUserUid),
+      singleRecord: true,
+    );
+
+    if (existingLikes.isNotEmpty) {
+      await existingLikes.first.reference.delete();
+      await post.reference.update(
+        mapToFirestore({'likesCount': FieldValue.increment(-1)}),
+      );
+      return;
+    }
+
+    await LikesRecord.collection.doc().set({
+      ...createLikesRecordData(
+        postRef: post.reference,
+        userId: currentUserUid,
+      ),
+      ...mapToFirestore({'createdAt': FieldValue.serverTimestamp()}),
+    });
+    await post.reference.update(
+      mapToFirestore({'likesCount': FieldValue.increment(1)}),
+    );
+  }
+
+  Future<void> _reportPost(PostsRecord post) async {
+    if (currentUserUid.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Connectez-vous pour signaler une discussion.')),
+      );
+      return;
+    }
+
+    final existingReports = await queryReportsRecordOnce(
+      queryBuilder: (reportsRecord) => reportsRecord
+          .where('targetType', isEqualTo: 'post')
+          .where('targetId', isEqualTo: post.reference.id)
+          .where('reportedBy', isEqualTo: currentUserUid),
+      singleRecord: true,
+    );
+
+    if (existingReports.isEmpty) {
+      await ReportsRecord.collection.doc().set({
+        ...createReportsRecordData(
+          targetType: 'post',
+          targetId: post.reference.id,
+          reason: 'Signalement depuis le forum',
+          reportedBy: currentUserUid,
+        ),
+        ...mapToFirestore({'createdAt': FieldValue.serverTimestamp()}),
+      });
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Discussion signalée. Merci.')),
+    );
+  }
+
+  void _showNotificationsMessage() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Aucune notification pour le moment.')),
+    );
+  }
+
+  Future<void> _showProfileMenu() async {
+    await showDialog(
+      context: context,
+      builder: (alertDialogContext) {
+        return AlertDialog(
+          title: Text('Profil'),
+          content: Text(
+            currentUserDisplayName.isNotEmpty
+                ? currentUserDisplayName
+                : currentUserEmail,
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(alertDialogContext),
+              child: Text('Fermer'),
+            ),
+            TextButton(
+              onPressed: () async {
+                Navigator.pop(alertDialogContext);
+                GoRouter.of(context).prepareAuthEvent();
+                await authManager.signOut();
+                GoRouter.of(context).clearRedirectLocation();
+                context.goNamedAuth(LoginWidget.routeName, context.mounted);
+              },
+              child: Text('Se déconnecter'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   @override
@@ -136,7 +323,7 @@ class _ForumHomeWidgetState extends State<ForumHomeWidget> {
                       size: 24.0,
                     ),
                     onPressed: () {
-                      print('IconButton pressed ...');
+                      _showNotificationsMessage();
                     },
                   ),
                   FlutterFlowIconButton(
@@ -147,8 +334,8 @@ class _ForumHomeWidgetState extends State<ForumHomeWidget> {
                       color: Colors.white,
                       size: 24.0,
                     ),
-                    onPressed: () {
-                      print('IconButton pressed ...');
+                    onPressed: () async {
+                      await _showProfileMenu();
                     },
                   ),
                 ].divide(SizedBox(width: 4.0)),
@@ -186,47 +373,74 @@ class _ForumHomeWidgetState extends State<ForumHomeWidget> {
                             ),
                             child: Padding(
                               padding: EdgeInsetsDirectional.fromSTEB(
-                                  16.0, 0.0, 16.0, 0.0),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.max,
-                                children: [
-                                  Icon(
+                                  12.0, 0.0, 12.0, 0.0),
+                              child: TextFormField(
+                                controller: _model.searchTextController,
+                                focusNode: _model.searchFocusNode,
+                                onChanged: (_) => safeSetState(() {}),
+                                autofocus: false,
+                                obscureText: false,
+                                decoration: InputDecoration(
+                                  hintText: 'Rechercher un sujet...',
+                                  hintStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .override(
+                                        font: GoogleFonts.inter(
+                                          fontWeight:
+                                              FlutterFlowTheme.of(context)
+                                                  .bodyMedium
+                                                  .fontWeight,
+                                          fontStyle:
+                                              FlutterFlowTheme.of(context)
+                                                  .bodyMedium
+                                                  .fontStyle,
+                                        ),
+                                        color: Color(0xFF94A3B8),
+                                        letterSpacing: 0.0,
+                                        fontWeight: FlutterFlowTheme.of(context)
+                                            .bodyMedium
+                                            .fontWeight,
+                                        fontStyle: FlutterFlowTheme.of(context)
+                                            .bodyMedium
+                                            .fontStyle,
+                                      ),
+                                  prefixIcon: Icon(
                                     Icons.search_rounded,
                                     color: Color(0xFF94A3B8),
                                     size: 20.0,
                                   ),
-                                  Padding(
-                                    padding: EdgeInsetsDirectional.fromSTEB(
-                                        12.0, 0.0, 12.0, 0.0),
-                                    child: Text(
-                                      'Rechercher un sujet...',
-                                      style: FlutterFlowTheme.of(context)
+                                  border: InputBorder.none,
+                                  enabledBorder: InputBorder.none,
+                                  focusedBorder: InputBorder.none,
+                                  errorBorder: InputBorder.none,
+                                  focusedErrorBorder: InputBorder.none,
+                                  contentPadding:
+                                      EdgeInsetsDirectional.fromSTEB(
+                                          0.0, 14.0, 0.0, 12.0),
+                                ),
+                                style: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .override(
+                                      font: GoogleFonts.inter(
+                                        fontWeight: FlutterFlowTheme.of(context)
+                                            .bodyMedium
+                                            .fontWeight,
+                                        fontStyle: FlutterFlowTheme.of(context)
+                                            .bodyMedium
+                                            .fontStyle,
+                                      ),
+                                      color: Color(0xFF1E293B),
+                                      letterSpacing: 0.0,
+                                      fontWeight: FlutterFlowTheme.of(context)
                                           .bodyMedium
-                                          .override(
-                                            font: GoogleFonts.inter(
-                                              fontWeight:
-                                                  FlutterFlowTheme.of(context)
-                                                      .bodyMedium
-                                                      .fontWeight,
-                                              fontStyle:
-                                                  FlutterFlowTheme.of(context)
-                                                      .bodyMedium
-                                                      .fontStyle,
-                                            ),
-                                            color: Color(0xFF94A3B8),
-                                            letterSpacing: 0.0,
-                                            fontWeight:
-                                                FlutterFlowTheme.of(context)
-                                                    .bodyMedium
-                                                    .fontWeight,
-                                            fontStyle:
-                                                FlutterFlowTheme.of(context)
-                                                    .bodyMedium
-                                                    .fontStyle,
-                                          ),
+                                          .fontWeight,
+                                      fontStyle: FlutterFlowTheme.of(context)
+                                          .bodyMedium
+                                          .fontStyle,
                                     ),
-                                  ),
-                                ],
+                                validator: _model
+                                    .searchTextControllerValidator
+                                    .asValidator(context),
                               ),
                             ),
                           ),
@@ -259,254 +473,14 @@ class _ForumHomeWidgetState extends State<ForumHomeWidget> {
                         child: Row(
                           mainAxisSize: MainAxisSize.max,
                           children: [
-                            Padding(
-                              padding: EdgeInsetsDirectional.fromSTEB(
-                                  16.0, 0.0, 16.0, 0.0),
-                              child: Container(
-                                height: 36.0,
-                                decoration: BoxDecoration(
-                                  color: Color(0xFF2563EB),
-                                  borderRadius: BorderRadius.circular(18.0),
-                                ),
-                                child: Align(
-                                  alignment: AlignmentDirectional(0.0, 0.0),
-                                  child: Padding(
-                                    padding: EdgeInsets.all(8.0),
-                                    child: Text(
-                                      'Tous',
-                                      style: FlutterFlowTheme.of(context)
-                                          .labelMedium
-                                          .override(
-                                            font: GoogleFonts.inter(
-                                              fontWeight: FontWeight.w600,
-                                              fontStyle:
-                                                  FlutterFlowTheme.of(context)
-                                                      .labelMedium
-                                                      .fontStyle,
-                                            ),
-                                            color: Colors.white,
-                                            letterSpacing: 0.0,
-                                            fontWeight: FontWeight.w600,
-                                            fontStyle:
-                                                FlutterFlowTheme.of(context)
-                                                    .labelMedium
-                                                    .fontStyle,
-                                          ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                            Padding(
-                              padding: EdgeInsetsDirectional.fromSTEB(
-                                  16.0, 0.0, 16.0, 0.0),
-                              child: Container(
-                                height: 36.0,
-                                decoration: BoxDecoration(
-                                  color: Color(0xFFEFF6FF),
-                                  borderRadius: BorderRadius.circular(18.0),
-                                  border: Border.all(
-                                    color: Color(0xFFBFDBFE),
-                                    width: 1.0,
-                                  ),
-                                ),
-                                child: Align(
-                                  alignment: AlignmentDirectional(0.0, 0.0),
-                                  child: Padding(
-                                    padding: EdgeInsets.all(8.0),
-                                    child: Text(
-                                      'Dev',
-                                      style: FlutterFlowTheme.of(context)
-                                          .labelMedium
-                                          .override(
-                                            font: GoogleFonts.inter(
-                                              fontWeight: FontWeight.w600,
-                                              fontStyle:
-                                                  FlutterFlowTheme.of(context)
-                                                      .labelMedium
-                                                      .fontStyle,
-                                            ),
-                                            color: Color(0xFF2563EB),
-                                            letterSpacing: 0.0,
-                                            fontWeight: FontWeight.w600,
-                                            fontStyle:
-                                                FlutterFlowTheme.of(context)
-                                                    .labelMedium
-                                                    .fontStyle,
-                                          ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                            Padding(
-                              padding: EdgeInsetsDirectional.fromSTEB(
-                                  16.0, 0.0, 16.0, 0.0),
-                              child: Container(
-                                height: 36.0,
-                                decoration: BoxDecoration(
-                                  color: Color(0xFFEFF6FF),
-                                  borderRadius: BorderRadius.circular(18.0),
-                                  border: Border.all(
-                                    color: Color(0xFFBFDBFE),
-                                    width: 1.0,
-                                  ),
-                                ),
-                                child: Align(
-                                  alignment: AlignmentDirectional(0.0, 0.0),
-                                  child: Padding(
-                                    padding: EdgeInsets.all(8.0),
-                                    child: Text(
-                                      'IA',
-                                      style: FlutterFlowTheme.of(context)
-                                          .labelMedium
-                                          .override(
-                                            font: GoogleFonts.inter(
-                                              fontWeight: FontWeight.w600,
-                                              fontStyle:
-                                                  FlutterFlowTheme.of(context)
-                                                      .labelMedium
-                                                      .fontStyle,
-                                            ),
-                                            color: Color(0xFF2563EB),
-                                            letterSpacing: 0.0,
-                                            fontWeight: FontWeight.w600,
-                                            fontStyle:
-                                                FlutterFlowTheme.of(context)
-                                                    .labelMedium
-                                                    .fontStyle,
-                                          ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                            Padding(
-                              padding: EdgeInsetsDirectional.fromSTEB(
-                                  16.0, 0.0, 16.0, 0.0),
-                              child: Container(
-                                height: 36.0,
-                                decoration: BoxDecoration(
-                                  color: Color(0xFFEFF6FF),
-                                  borderRadius: BorderRadius.circular(18.0),
-                                  border: Border.all(
-                                    color: Color(0xFFBFDBFE),
-                                    width: 1.0,
-                                  ),
-                                ),
-                                child: Align(
-                                  alignment: AlignmentDirectional(0.0, 0.0),
-                                  child: Padding(
-                                    padding: EdgeInsets.all(8.0),
-                                    child: Text(
-                                      'Réseau',
-                                      style: FlutterFlowTheme.of(context)
-                                          .labelMedium
-                                          .override(
-                                            font: GoogleFonts.inter(
-                                              fontWeight: FontWeight.w600,
-                                              fontStyle:
-                                                  FlutterFlowTheme.of(context)
-                                                      .labelMedium
-                                                      .fontStyle,
-                                            ),
-                                            color: Color(0xFF2563EB),
-                                            letterSpacing: 0.0,
-                                            fontWeight: FontWeight.w600,
-                                            fontStyle:
-                                                FlutterFlowTheme.of(context)
-                                                    .labelMedium
-                                                    .fontStyle,
-                                          ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                            Padding(
-                              padding: EdgeInsetsDirectional.fromSTEB(
-                                  16.0, 0.0, 16.0, 0.0),
-                              child: Container(
-                                height: 36.0,
-                                decoration: BoxDecoration(
-                                  color: Color(0xFFEFF6FF),
-                                  borderRadius: BorderRadius.circular(18.0),
-                                  border: Border.all(
-                                    color: Color(0xFFBFDBFE),
-                                    width: 1.0,
-                                  ),
-                                ),
-                                child: Align(
-                                  alignment: AlignmentDirectional(0.0, 0.0),
-                                  child: Padding(
-                                    padding: EdgeInsets.all(8.0),
-                                    child: Text(
-                                      'Cloud',
-                                      style: FlutterFlowTheme.of(context)
-                                          .labelMedium
-                                          .override(
-                                            font: GoogleFonts.inter(
-                                              fontWeight: FontWeight.w600,
-                                              fontStyle:
-                                                  FlutterFlowTheme.of(context)
-                                                      .labelMedium
-                                                      .fontStyle,
-                                            ),
-                                            color: Color(0xFF2563EB),
-                                            letterSpacing: 0.0,
-                                            fontWeight: FontWeight.w600,
-                                            fontStyle:
-                                                FlutterFlowTheme.of(context)
-                                                    .labelMedium
-                                                    .fontStyle,
-                                          ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                            Padding(
-                              padding: EdgeInsetsDirectional.fromSTEB(
-                                  16.0, 0.0, 16.0, 0.0),
-                              child: Container(
-                                height: 36.0,
-                                decoration: BoxDecoration(
-                                  color: Color(0xFFEFF6FF),
-                                  borderRadius: BorderRadius.circular(18.0),
-                                  border: Border.all(
-                                    color: Color(0xFFBFDBFE),
-                                    width: 1.0,
-                                  ),
-                                ),
-                                child: Align(
-                                  alignment: AlignmentDirectional(0.0, 0.0),
-                                  child: Padding(
-                                    padding: EdgeInsets.all(8.0),
-                                    child: Text(
-                                      'Sécurité',
-                                      style: FlutterFlowTheme.of(context)
-                                          .labelMedium
-                                          .override(
-                                            font: GoogleFonts.inter(
-                                              fontWeight: FontWeight.w600,
-                                              fontStyle:
-                                                  FlutterFlowTheme.of(context)
-                                                      .labelMedium
-                                                      .fontStyle,
-                                            ),
-                                            color: Color(0xFF2563EB),
-                                            letterSpacing: 0.0,
-                                            fontWeight: FontWeight.w600,
-                                            fontStyle:
-                                                FlutterFlowTheme.of(context)
-                                                    .labelMedium
-                                                    .fontStyle,
-                                          ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
+                            _categoryChip('Tous', 'Tous'),
+                            _categoryChip('Dev', 'Dev'),
+                            _categoryChip('IA', 'IA'),
+                            _categoryChip('Réseau', 'Réseau'),
+                            _categoryChip('Cloud', 'Cloud'),
+                            _categoryChip('Sécurité', 'Sécurité'),
+                            _categoryChip('Backend', 'Backend'),
+                            _categoryChip('DevOps', 'DevOps'),
                           ]
                               .divide(SizedBox(width: 8.0))
                               .addToStart(SizedBox(width: 16.0))
@@ -605,8 +579,46 @@ class _ForumHomeWidgetState extends State<ForumHomeWidget> {
                           ),
                         );
                       }
-                      List<PostsRecord> listViewPostsRecordList =
-                          snapshot.data!;
+                      List<PostsRecord> listViewPostsRecordList = snapshot
+                          .data!
+                          .where((post) =>
+                              _matchesCategory(post) && _matchesSearch(post))
+                          .toList()
+                        ..sort((a, b) =>
+                            (b.createdAt ??
+                                    DateTime.fromMillisecondsSinceEpoch(0))
+                                .compareTo(a.createdAt ??
+                                    DateTime.fromMillisecondsSinceEpoch(0)));
+
+                      if (listViewPostsRecordList.isEmpty) {
+                        return Padding(
+                          padding: EdgeInsets.all(24.0),
+                          child: Text(
+                            'Aucune discussion trouvée.',
+                            textAlign: TextAlign.center,
+                            style: FlutterFlowTheme.of(context)
+                                .bodyMedium
+                                .override(
+                                  font: GoogleFonts.inter(
+                                    fontWeight: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontWeight,
+                                    fontStyle: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontStyle,
+                                  ),
+                                  color: Color(0xFF64748B),
+                                  letterSpacing: 0.0,
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                          ),
+                        );
+                      }
 
                       return ListView.builder(
                         padding: EdgeInsets.zero,
@@ -616,9 +628,22 @@ class _ForumHomeWidgetState extends State<ForumHomeWidget> {
                         itemBuilder: (context, listViewIndex) {
                           final listViewPostsRecord =
                               listViewPostsRecordList[listViewIndex];
-                          return Padding(
-                            padding: EdgeInsets.all(16.0),
-                            child: Container(
+                          return InkWell(
+                            borderRadius: BorderRadius.circular(16.0),
+                            onTap: () async {
+                              context.pushNamed(
+                                PostDetailsPageWidget.routeName,
+                                queryParameters: {
+                                  'postRef': serializeParam(
+                                    listViewPostsRecord.reference,
+                                    ParamType.DocumentReference,
+                                  ),
+                                }.withoutNulls,
+                              );
+                            },
+                            child: Padding(
+                              padding: EdgeInsets.all(16.0),
+                              child: Container(
                               width: double.infinity,
                               decoration: BoxDecoration(
                                 color: Colors.white,
@@ -696,26 +721,18 @@ class _ForumHomeWidgetState extends State<ForumHomeWidget> {
                                               crossAxisAlignment:
                                                   CrossAxisAlignment.start,
                                               children: [
-                                                AuthUserStreamWidget(
-                                                  builder: (context) => Text(
-                                                    currentUserDisplayName,
-                                                    style: FlutterFlowTheme.of(
-                                                            context)
-                                                        .labelLarge
-                                                        .override(
-                                                          font:
-                                                              GoogleFonts.inter(
-                                                            fontWeight:
-                                                                FontWeight.w600,
-                                                            fontStyle:
-                                                                FlutterFlowTheme.of(
-                                                                        context)
-                                                                    .labelLarge
-                                                                    .fontStyle,
-                                                          ),
-                                                          color:
-                                                              Color(0xFF1E293B),
-                                                          letterSpacing: 0.0,
+                                                Text(
+                                                  valueOrDefault<String>(
+                                                    listViewPostsRecord
+                                                        .authorName,
+                                                    'Membre',
+                                                  ),
+                                                  style: FlutterFlowTheme.of(
+                                                          context)
+                                                      .labelLarge
+                                                      .override(
+                                                        font:
+                                                            GoogleFonts.inter(
                                                           fontWeight:
                                                               FontWeight.w600,
                                                           fontStyle:
@@ -724,7 +741,17 @@ class _ForumHomeWidgetState extends State<ForumHomeWidget> {
                                                                   .labelLarge
                                                                   .fontStyle,
                                                         ),
-                                                  ),
+                                                        color:
+                                                            Color(0xFF1E293B),
+                                                        letterSpacing: 0.0,
+                                                        fontWeight:
+                                                            FontWeight.w600,
+                                                        fontStyle:
+                                                            FlutterFlowTheme.of(
+                                                                    context)
+                                                                .labelLarge
+                                                                .fontStyle,
+                                                      ),
                                                 ),
                                                 Padding(
                                                   padding: EdgeInsetsDirectional
@@ -746,7 +773,12 @@ class _ForumHomeWidgetState extends State<ForumHomeWidget> {
                                                         padding:
                                                             EdgeInsets.all(8.0),
                                                         child: Text(
-                                                          'Dev',
+                                                          valueOrDefault<
+                                                              String>(
+                                                            listViewPostsRecord
+                                                                .category,
+                                                            'Dev',
+                                                          ),
                                                           style: FlutterFlowTheme
                                                                   .of(context)
                                                               .labelSmall
@@ -791,8 +823,9 @@ class _ForumHomeWidgetState extends State<ForumHomeWidget> {
                                             color: Color(0xFF94A3B8),
                                             size: 18.0,
                                           ),
-                                          onPressed: () {
-                                            print('IconButton pressed ...');
+                                          onPressed: () async {
+                                            await _reportPost(
+                                                listViewPostsRecord);
                                           },
                                         ),
                                       ],
@@ -863,88 +896,133 @@ class _ForumHomeWidgetState extends State<ForumHomeWidget> {
                                         Row(
                                           mainAxisSize: MainAxisSize.max,
                                           children: [
-                                            Row(
-                                              mainAxisSize: MainAxisSize.max,
-                                              children: [
-                                                Icon(
-                                                  Icons.thumb_up_outlined,
-                                                  color: Color(0xFF2563EB),
-                                                  size: 16.0,
+                                            InkWell(
+                                              borderRadius:
+                                                  BorderRadius.circular(8.0),
+                                              onTap: () async {
+                                                await _toggleLike(
+                                                    listViewPostsRecord);
+                                              },
+                                              child: Padding(
+                                                padding: EdgeInsets.all(4.0),
+                                                child: Row(
+                                                  mainAxisSize:
+                                                      MainAxisSize.max,
+                                                  children: [
+                                                    Icon(
+                                                      Icons.thumb_up_outlined,
+                                                      color: Color(0xFF2563EB),
+                                                      size: 16.0,
+                                                    ),
+                                                    Text(
+                                                      listViewPostsRecord
+                                                          .likesCount
+                                                          .toString(),
+                                                      style:
+                                                          FlutterFlowTheme.of(
+                                                                  context)
+                                                              .labelSmall
+                                                              .override(
+                                                                font:
+                                                                    GoogleFonts
+                                                                        .inter(
+                                                                  fontWeight:
+                                                                      FontWeight
+                                                                          .w600,
+                                                                  fontStyle: FlutterFlowTheme.of(
+                                                                          context)
+                                                                      .labelSmall
+                                                                      .fontStyle,
+                                                                ),
+                                                                color: Color(
+                                                                    0xFF2563EB),
+                                                                letterSpacing:
+                                                                    0.0,
+                                                                fontWeight:
+                                                                    FontWeight
+                                                                        .w600,
+                                                                fontStyle: FlutterFlowTheme.of(
+                                                                        context)
+                                                                    .labelSmall
+                                                                    .fontStyle,
+                                                              ),
+                                                    ),
+                                                  ].divide(
+                                                      SizedBox(width: 4.0)),
                                                 ),
-                                                Text(
-                                                  listViewPostsRecord.likesCount
-                                                      .toString(),
-                                                  style: FlutterFlowTheme.of(
-                                                          context)
-                                                      .labelSmall
-                                                      .override(
-                                                        font: GoogleFonts.inter(
-                                                          fontWeight:
-                                                              FontWeight.w600,
-                                                          fontStyle:
-                                                              FlutterFlowTheme.of(
-                                                                      context)
-                                                                  .labelSmall
-                                                                  .fontStyle,
-                                                        ),
-                                                        color:
-                                                            Color(0xFF2563EB),
-                                                        letterSpacing: 0.0,
-                                                        fontWeight:
-                                                            FontWeight.w600,
-                                                        fontStyle:
-                                                            FlutterFlowTheme.of(
-                                                                    context)
-                                                                .labelSmall
-                                                                .fontStyle,
-                                                      ),
-                                                ),
-                                              ].divide(SizedBox(width: 4.0)),
+                                              ),
                                             ),
-                                            Row(
-                                              mainAxisSize: MainAxisSize.max,
-                                              children: [
-                                                Icon(
-                                                  Icons
-                                                      .chat_bubble_outline_rounded,
-                                                  color: Color(0xFF64748B),
-                                                  size: 16.0,
+                                            InkWell(
+                                              borderRadius:
+                                                  BorderRadius.circular(8.0),
+                                              onTap: () async {
+                                                context.pushNamed(
+                                                  PostDetailsPageWidget
+                                                      .routeName,
+                                                  queryParameters: {
+                                                    'postRef': serializeParam(
+                                                      listViewPostsRecord
+                                                          .reference,
+                                                      ParamType
+                                                          .DocumentReference,
+                                                    ),
+                                                  }.withoutNulls,
+                                                );
+                                              },
+                                              child: Padding(
+                                                padding: EdgeInsets.all(4.0),
+                                                child: Row(
+                                                  mainAxisSize:
+                                                      MainAxisSize.max,
+                                                  children: [
+                                                    Icon(
+                                                      Icons
+                                                          .chat_bubble_outline_rounded,
+                                                      color: Color(0xFF64748B),
+                                                      size: 16.0,
+                                                    ),
+                                                    Text(
+                                                      listViewPostsRecord
+                                                          .commentsCount
+                                                          .toString(),
+                                                      style:
+                                                          FlutterFlowTheme.of(
+                                                                  context)
+                                                              .labelSmall
+                                                              .override(
+                                                                font:
+                                                                    GoogleFonts
+                                                                        .inter(
+                                                                  fontWeight:
+                                                                      FontWeight
+                                                                          .w600,
+                                                                  fontStyle: FlutterFlowTheme.of(
+                                                                          context)
+                                                                      .labelSmall
+                                                                      .fontStyle,
+                                                                ),
+                                                                color: Color(
+                                                                    0xFF64748B),
+                                                                letterSpacing:
+                                                                    0.0,
+                                                                fontWeight:
+                                                                    FontWeight
+                                                                        .w600,
+                                                                fontStyle: FlutterFlowTheme.of(
+                                                                        context)
+                                                                    .labelSmall
+                                                                    .fontStyle,
+                                                              ),
+                                                    ),
+                                                  ].divide(
+                                                      SizedBox(width: 4.0)),
                                                 ),
-                                                Text(
-                                                  listViewPostsRecord
-                                                      .commentsCount
-                                                      .toString(),
-                                                  style: FlutterFlowTheme.of(
-                                                          context)
-                                                      .labelSmall
-                                                      .override(
-                                                        font: GoogleFonts.inter(
-                                                          fontWeight:
-                                                              FontWeight.w600,
-                                                          fontStyle:
-                                                              FlutterFlowTheme.of(
-                                                                      context)
-                                                                  .labelSmall
-                                                                  .fontStyle,
-                                                        ),
-                                                        color:
-                                                            Color(0xFF64748B),
-                                                        letterSpacing: 0.0,
-                                                        fontWeight:
-                                                            FontWeight.w600,
-                                                        fontStyle:
-                                                            FlutterFlowTheme.of(
-                                                                    context)
-                                                                .labelSmall
-                                                                .fontStyle,
-                                                      ),
-                                                ),
-                                              ].divide(SizedBox(width: 4.0)),
+                                              ),
                                             ),
                                           ].divide(SizedBox(width: 16.0)),
                                         ),
                                         Text(
-                                          'publié : ${listViewPostsRecord.createdAt?.toString()}',
+                                          "Publié : ${dateTimeFormat('d/M/y HH:mm', listViewPostsRecord.createdAt)}",
                                           style: FlutterFlowTheme.of(context)
                                               .labelSmall
                                               .override(
@@ -976,6 +1054,7 @@ class _ForumHomeWidgetState extends State<ForumHomeWidget> {
                                     ),
                                   ].divide(SizedBox(height: 12.0)),
                                 ),
+                              ),
                               ),
                             ),
                           );
